@@ -748,6 +748,16 @@ impl WordApp {
             return;
         }
         let target = self.active_viewport();
+        if self.windows.input_plugin {
+            ctx.with_plugin(|p: &mut ViewportInput| {
+                // Never retarget input left over from a different (possibly closed) window.
+                // Drop it when focus changes; only events for the same window can be appended.
+                if p.target != Some(target) {
+                    p.target = None;
+                    p.events.clear();
+                }
+            });
+        }
         if self.control_input_is_roots(ctx) {
             raw.events.extend(events);
         } else {

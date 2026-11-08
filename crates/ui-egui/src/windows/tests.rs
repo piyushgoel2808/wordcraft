@@ -402,6 +402,54 @@ fn route_input_reaches_the_active_window() {
     assert_eq!(text(&a), "First", "the root window was untouched");
 }
 
+/// Undrained events must not follow focus into another document window.
+#[test]
+fn route_input_drops_old_target_and_appends_for_the_same_target() {
+    let ctx = backend();
+    let mut a = app("First");
+    frames(&ctx, &mut a, 2);
+    a.run("file.new", json!({})).unwrap();
+    let first_child = a.active_viewport();
+    assert_ne!(first_child, ViewportId::ROOT);
+    let mut raw = input(ViewportId::ROOT);
+    a.route_input(&ctx, &mut raw, vec![egui::Event::Paste("Stale".into())]);
+    a.run("file.new", json!({})).unwrap();
+    let second_child = a.active_viewport();
+    assert_ne!(second_child, first_child);
+    a.route_input(&ctx, &mut raw, vec![egui::Event::Paste("Fresh".into())]);
+    a.route_input(&ctx, &mut raw, vec![egui::Event::Paste(" appended".into())]);
+    assert!(raw.events.is_empty());
+    let mut delivered = input(second_child);
+    ctx.with_plugin(|p: &mut super::ViewportInput| egui::Plugin::input_hook(p, &ctx, &mut delivered));
+    assert_eq!(delivered.events, [egui::Event::Paste("Fresh".into()), egui::Event::Paste(" appended".into())]);
+    let mut old = input(first_child);
+    ctx.with_plugin(|p: &mut super::ViewportInput| egui::Plugin::input_hook(p, &ctx, &mut old));
+    assert!(old.events.is_empty(), "discarded input cannot arrive later");
+}
+
+/// Closing a window with pending input discards it, including when focus returns to root.
+#[test]
+fn route_input_drops_closed_window_input_before_routing_to_root() {
+    let ctx = backend();
+    let mut a = app("First");
+    frames(&ctx, &mut a, 2);
+    a.run("file.new", json!({})).unwrap();
+    let child = a.active_viewport();
+    let mut raw = input(ViewportId::ROOT);
+    a.route_input(&ctx, &mut raw, vec![egui::Event::Paste("Stale".into())]);
+    a.run("file.close", json!({})).unwrap();
+    assert_eq!(a.active_viewport(), ViewportId::ROOT);
+    a.route_input(&ctx, &mut raw, vec![egui::Event::Paste("Root".into())]);
+    assert_eq!(raw.events, [egui::Event::Paste("Root".into())]);
+    ctx.with_plugin(|p: &mut super::ViewportInput| {
+        assert!(p.target.is_none());
+        assert!(p.events.is_empty());
+    });
+    let mut closed = input(child);
+    ctx.with_plugin(|p: &mut super::ViewportInput| egui::Plugin::input_hook(p, &ctx, &mut closed));
+    assert!(closed.events.is_empty());
+}
+
 /// `ui.screenshot` captures the active window: the capture is sized from its viewport and the
 /// command goes to that viewport. A capture still pending when another window comes forward
 /// fails with an error instead of capturing that window.
