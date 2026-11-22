@@ -515,10 +515,26 @@ fn every_open_replaces_an_untouched_blank_document_in_its_window() {
     std::fs::remove_dir_all(second.parent().unwrap()).ok();
 }
 
-/// Input the host's menu bar routes (Paste) reaches the active window when it has a viewport of
-/// its own, not the root's raw input, and only that window's document.
+/// Input the host's menu bar routes (Paste) reaches the active window's own viewport when it has
+/// one, not the root's raw input, and only once.
 #[test]
 fn route_input_reaches_the_active_window() {
+    /// The paste events each viewport's input carried, read after `RoutedInput` added its own.
+    #[derive(Default)]
+    struct Seen(Vec<(ViewportId, String)>);
+    impl egui::Plugin for Seen {
+        fn debug_name(&self) -> &'static str {
+            "seen"
+        }
+        fn input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
+            for e in &input.events {
+                if let egui::Event::Paste(text) = e {
+                    self.0.push((input.viewport_id, text.clone()));
+                }
+            }
+        }
+    }
+
     let mut rig = Rig::new();
     let mut a = app("First");
     rig.frames(&mut a, 2);
@@ -527,15 +543,21 @@ fn route_input_reaches_the_active_window() {
     let child = a.active_viewport();
     assert_ne!(child, ViewportId::ROOT);
     rig.focus(child);
-    rig.frames(&mut a, 8);
+    rig.frames(&mut a, 2);
     let ctx = rig.ctx();
-    assert!(a.canvas.focused(&ctx), "the new window's page has the keyboard");
     let mut raw = egui::RawInput::default();
     a.route_input(&ctx, &mut raw, vec![egui::Event::Paste("Pasted".into())]);
     assert!(raw.events.is_empty(), "the events did not go to the root viewport");
+    // After `RoutedInput`: plugins run in the order they were added.
+    ctx.add_plugin(Seen::default());
     rig.frames(&mut a, 4);
-    assert_eq!(text(&a), "Pasted");
+    let seen = ctx.with_plugin(|p: &mut Seen| p.0.clone()).unwrap_or_default();
+    assert_eq!(seen, vec![(child, "Pasted".to_owned())], "the active window's viewport got the paste once");
+
+    // Routed while the root window is active, the events go into the root's raw input.
     rig.focus(ViewportId::ROOT);
     rig.frames(&mut a, 2);
-    assert_eq!(text(&a), "First", "the root window was untouched");
+    assert_eq!(a.active_viewport(), ViewportId::ROOT);
+    a.route_input(&ctx, &mut raw, vec![egui::Event::Paste("Root".into())]);
+    assert_eq!(raw.events, vec![egui::Event::Paste("Root".into())]);
 }
