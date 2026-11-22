@@ -7,7 +7,7 @@
 //! carry no key equivalents (Quit uses ⌘Q): the keyboard keeps going through egui and the keymap exactly as before,
 //! so a menu never takes a key away from a text field or the document.
 //!
-//! Quit routes through `Action::Quit` -> `WordApp::quit_requested` so unsaved changes prompt the user
+//! Quit routes through `Action::Quit` -> `WordApp::quit` (then `quit_requested`) so unsaved changes prompt the user
 //! before exiting, protecting against accidental closure on Command-Q (#4295).
 //!
 //! The item list is plain data (tested on every platform against the registry); the AppKit part
@@ -290,7 +290,7 @@ mod bar {
     use muda::accelerator::Accelerator;
     use muda::{IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use serde_json::{Value, json};
-    use wordcraft_ui_egui::{WordApp, i18n, widgets};
+    use wordcraft_ui_egui::{WordApp, i18n};
 
     use super::{ABOUT, Entry, InputKind, MENUS, SETTINGS};
 
@@ -509,17 +509,16 @@ mod bar {
                         }
                     }
                     Action::Minimize => ctx.send_viewport_cmd_to(app.active_viewport(), egui::ViewportCommand::Minimized(true)),
+                    // Asks about every unsaved document first; the host closes once it may.
                     Action::Quit => {
-                        if app.close_requested() {
-                            app.quit_requested = true;
-                        }
+                        app.quit();
                     }
                     Action::Input(kind) => {
                         let events = input_events(kind);
                         if events.is_empty() {
                             // Paste with no text on the clipboard (a picture): the ribbon's Paste,
                             // which reads pictures, HTML and RTF itself (#45, #584, #687).
-                            if app.canvas.focused
+                            if app.canvas.focused(ctx)
                                 && let Err(err) = app.run("edit.paste", json!({}))
                             {
                                 app.status(err);
@@ -532,7 +531,7 @@ mod bar {
                 ctx.request_repaint();
             }
             for t in &mut me.tracked {
-                let enabled = widgets::enabled(app, t.id);
+                let enabled = app.command_enabled(t.id);
                 if enabled != t.enabled {
                     t.item.set_enabled(enabled);
                     t.enabled = enabled;
@@ -574,7 +573,12 @@ mod bar {
             InputKind::Copy => vec![egui::Event::Copy],
             InputKind::Paste => {
                 // As egui-winit does for ⌘V: a paste event only when there is text.
-                let text = arboard::Clipboard::new().and_then(|mut c| c.get_text()).unwrap_or_default().replace("\r\n", "\n");
+                let text = craft::platform::clipboard::Clipboard::new(craft::platform::clipboard::SystemClipboard::new())
+                    .read_text()
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+                    .replace("\r\n", "\n");
                 if text.is_empty() { Vec::new() } else { vec![egui::Event::Paste(text)] }
             }
             InputKind::SelectAll => [true, false]
@@ -659,6 +663,9 @@ mod tests {
                 continue;
             }
             let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), Services::default());
+            // The hosted dialogs open nothing before the window's context is known, as in the
+            // app, where the menu runs after the first frame's `logic`.
+            app.logic(&egui::Context::default());
             let r = app.run(id, params.clone());
             // Commands that need something first (a search, a copy, an edit) say so, as their
             // keys do; that is not a dead item.
@@ -690,7 +697,7 @@ mod tests {
                 && !NEEDS_STATE.contains(&id)
             {
                 failures.push(format!("{id} {params}: {err}"));
-            } else if id == "ui.dialog" && app.dialog.is_none() {
+            } else if id == "ui.dialog" && app.dialog_host.is_empty() {
                 failures.push(format!("{id} {params}: no such dialog"));
             }
         }
